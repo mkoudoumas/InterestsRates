@@ -13,60 +13,101 @@ namespace Rates.Scraping;
 
 public sealed class SpecialRateProvider : IRateProvider
 {
-    // Use the same URL you tried before. Playwright will load it like a real browser.
+    // You can also test the English URL if you prefer
     private const string Url =
         "https://www.bankofgreece.gr/statistika/xrhmatopistwtikes-agores/ekswtrapezika-epitokia";
 
     public async Task<IReadOnlyList<RatePeriod>> GetPeriodsAsync()
     {
-        // 1) Prepare output folder and file name under the app's directory
+        const string Url = "https://www.bankofgreece.gr/statistika/xrhmatopistwtikes-agores/ekswtrapezika-epitokia";
+
+        using var playwright = await Playwright.CreateAsync();
+
+        var userDataDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "BogRatesScraperProfile");
+        Directory.CreateDirectory(userDataDir);
+
+        await using var context = await playwright.Chromium.LaunchPersistentContextAsync(
+            userDataDir,
+            new BrowserTypeLaunchPersistentContextOptions
+            {
+                Channel = "msedge",   // falls back to stock Chromium if Edge not found
+                Headless = false,     // visible helps bypass WAF; switch to true later if desired
+                Locale = "el-GR",
+                UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                            "(KHTML, like Gecko) Chrome/123.0 Safari/537.36",
+                IgnoreHTTPSErrors = true,
+                ViewportSize = new ViewportSize { Width = 1280, Height = 900 },
+                BypassCSP = true
+            });
+
+        var page = context.Pages.FirstOrDefault() ?? await context.NewPageAsync();
+
+        // 1) Navigate
+        await page.GotoAsync(Url, new PageGotoOptions
+        {
+            WaitUntil = WaitUntilState.NetworkIdle,
+            Timeout = 90000
+        });
+
+        // 2) Try to accept cookies (if any). CountAsync() works on all versions.
+        await page.WaitForTimeoutAsync(800);
+        try
+        {
+            var accept = page.Locator("button:has-text('Αποδοχή'), button:has-text('ΑΠΟΔΟΧΗ'), button:has-text('Accept')");
+            if (await accept.CountAsync() > 0)
+            {
+                await accept.First.ClickAsync(new LocatorClickOptions { Timeout = 3000 });
+            }
+        }
+        catch
+        {
+            // ignore if not found / not clickable
+        }
+
+        // 3) Grab HTML
+        var content = await page.ContentAsync();
+
+        // 4) Save locally (for debugging / audits)
         var dataDir = Path.Combine(AppContext.BaseDirectory, "Data");
         Directory.CreateDirectory(dataDir);
         var htmlPath = Path.Combine(dataDir, "bog_rates.html");
+        await File.WriteAllTextAsync(htmlPath, content, new UTF8Encoding(true));
 
-        // 2) Remove any previous file
-        if (File.Exists(htmlPath))
-            File.Delete(htmlPath);
-
-        // 3) Use Playwright (headless Chromium) to fetch the page
-        using var playwright = await Playwright.CreateAsync();
-        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+        // 5) Parse if the table exists (even if page text contains "Access denied")
+        if (HasRatesTable(content))
         {
-            Headless = true
-        });
+            var doc = new HtmlDocument();
+            doc.LoadHtml(content);
+            var periods = ParseDocumentToPeriods(doc);
+            if (periods.Count > 0) return periods;
+        }
 
-        // Optional: locale + UA help match a real visitor
-        var context = await browser.NewContextAsync(new BrowserNewContextOptions
-        {
-            UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                        "(KHTML, like Gecko) Chrome/122.0 Safari/537.36",
-            Locale = "el-GR"
-        });
-
-        var page = await context.NewPageAsync();
-        // Wait for network to settle; increase timeout if your connection is slow
-        await page.GotoAsync(Url, new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle, Timeout = 60000 });
-
-        // 4) Get the full rendered HTML and save it locally
-        var content = await page.ContentAsync();
-        await File.WriteAllTextAsync(htmlPath, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
-
-        // 5) Parse the saved HTML just like the Local provider
-        var doc = new HtmlDocument();
-        doc.LoadHtml(content);
-        var periods = ParseDocumentToPeriods(doc);
-
-        if (periods.Count == 0)
-            throw new InvalidOperationException("No rate periods parsed from downloaded HTML (page structure may have changed).");
-
-        return periods;
+        // 6) If we’re here, we didn’t find a parsable table
+        throw new InvalidOperationException(
+            "Access denied or the rates table was not found. " +
+            $"Saved HTML: {htmlPath}. Try Source=Local with a manually saved page.");
     }
 
-    // ---------- parser (mirrors LocalHtmlRateProvider) ----------
+    /* ---------- helpers (keep these in the same class) ---------- */
+
+    private static bool HasRatesTable(string html)
+    {
+        var doc = new HtmlDocument();
+        doc.LoadHtml(html);
+
+        var table =
+            doc.DocumentNode.SelectSingleNode("//table[.//th[contains(.,'Αρχική') or contains(.,'Valid From')]]")
+            ?? doc.DocumentNode.SelectSingleNode("//table[.//th[contains(.,'Τελική') or contains(.,'Valid To')]]")
+            ?? doc.DocumentNode.SelectSingleNode("//table[.//th[contains(.,'Δικαιοπρακτικός') or contains(.,'Contractual')]]")
+            ?? doc.DocumentNode.SelectSingleNode("//table[.//th[contains(.,'Υπερημερίας') or contains(.,'Overdue')]]");
+
+        return table != null;
+    }
 
     private static IReadOnlyList<RatePeriod> ParseDocumentToPeriods(HtmlDocument doc)
     {
-        // Try to find the correct table by header keywords (Greek or English)
         var table = doc.DocumentNode.SelectSingleNode(
             "//table[.//th[contains(.,'Αρχική') or contains(.,'Valid From')]]")
             ?? doc.DocumentNode.SelectSingleNode("//table[.//th[contains(.,'Δικαιοπρακτικός') or contains(.,'Contractual')]]");
