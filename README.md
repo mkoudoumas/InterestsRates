@@ -130,5 +130,3 @@ Scraping: HtmlAgilityPack + Playwright
 Configuration: Microsoft.Extensions.Configuration.* stack
 
 CSV export: UTF-8 with BOM (Excel-friendly)
-
-👉 Do you want me to make this README short and “student-test” focused (how to run and what difficulties we faced), or keep it professional/production style like this one (looks great on GitHub)?
