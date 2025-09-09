@@ -1,0 +1,68 @@
+# Build results
+bin/
+obj/
+
+# Visual Studio metadata
+.vs/
+*.vsidx
+
+# User-specific settings
+*.user
+*.suo
+
+# Build output
+bin/
+obj/
+
+# Saved local HTML + assets
+LocalInterestRates.html
+LocalInterestRates_files/
+
+# OS crap
+*.DS_Store
+Thumbs.db
+
+# Visual Studio files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# VS Code
+.vscode/
+
+# Rider
+.idea/
+
+# NuGet packages
+*.nupkg
+*.snupkg
+packages/
+
+# Logs
+*.log
+
+# Environment
+.env
+
+# Resharper
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.dbmdl
+
+# Publish outputs
+publish/
+artifacts/
+
+# Test results
+TestResult*/
+*.trx
+*.coverage
+*.coveragexml
