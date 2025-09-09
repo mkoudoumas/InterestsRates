@@ -183,26 +183,73 @@ internal static class Program
         foreach (var kv in byYear) yield return (kv.Key, kv.Value);
     }
 
-    private static string WriteCsv(IEnumerable<InterestSlice> slices, decimal amount, RateType rateType, DayCount method)
+    private static string WriteCsv(
+    IEnumerable<InterestSlice> slices,
+    decimal amount,
+    RateType rateType,
+    DayCount method,
+    string? outputDirectory = null)
     {
-        var now = DateTime.Now;
-        var fileName = $"interest_breakdown_{now:yyyyMMdd_HHmmss}.csv";
-        var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), fileName);
+        // 1) Decide where to save
+        var dir = string.IsNullOrWhiteSpace(outputDirectory)
+            ? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)  // default
+            : outputDirectory;
 
+        Directory.CreateDirectory(dir); // safe if it already exists
+
+        var fileName = $"interest_breakdown_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
+        var path = Path.Combine(dir, fileName);
+
+        // 2) Build CSV text (Excel-friendly)
         var sb = new StringBuilder();
+
+        // Force Excel to use comma as separator (prevents semicolon issues on some locales)
+        sb.AppendLine("sep=,");
+
+        // Metadata
         sb.AppendLine("Amount,RateType,Method");
-        sb.AppendLine($"{amount.ToString(CultureInfo.InvariantCulture)},{rateType},{method}");
+        sb.AppendLine($"{amount.ToString(System.Globalization.CultureInfo.InvariantCulture)},{rateType},{method}");
         sb.AppendLine();
+
+        // Data header
         sb.AppendLine("From,To,Days,AnnualPercent,Interest");
 
         foreach (var s in slices)
         {
-            sb.AppendLine($"{s.From:yyyy-MM-dd},{s.To:yyyy-MM-dd},{s.Days}," +
-                          $"{s.AnnualRatePercent.ToString("0.00", CultureInfo.InvariantCulture)}," +
-                          $"{s.Interest.ToString("0.00", CultureInfo.InvariantCulture)}");
+            sb.AppendLine(
+                $"{s.From:yyyy-MM-dd}," +
+                $"{s.To:yyyy-MM-dd}," +
+                $"{s.Days}," +
+                $"{s.AnnualRatePercent.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}," +
+                $"{s.Interest.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}"
+            );
         }
 
-        File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
-        return path;
+        // 3) Write with UTF-8 BOM for Excel compatibility
+        var utf8Bom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: true);
+        try
+        {
+            File.WriteAllText(path, sb.ToString(), utf8Bom);
+            return path;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to write CSV: {ex.Message}");
+            // Fall back to Documents if Desktop is blocked (OneDrive/permissions)
+            var docDir = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            var fallback = Path.Combine(docDir, fileName);
+            try
+            {
+                File.WriteAllText(fallback, sb.ToString(), utf8Bom);
+                Console.WriteLine($"Saved to Documents instead: {fallback}");
+                return fallback;
+            }
+            catch
+            {
+                // Re-throw the original for visibility
+                throw;
+            }
+        }
     }
+
 }
