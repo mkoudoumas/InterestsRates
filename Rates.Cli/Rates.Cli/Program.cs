@@ -4,31 +4,58 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Collections.Generic;
+using Microsoft.Extensions.Configuration;
 using Rates.Core;
 using Rates.Scraping;
+using Rates.Cli;
 
 internal static class Program
-{    
+{
     private static async System.Threading.Tasks.Task Main()
     {
         Console.OutputEncoding = Encoding.UTF8;
-        Console.WriteLine("=== Interest Calculator ===\n");
+        Console.WriteLine("=== Interest Calculator ===");
 
-        // 1) Inputs (form-like)
-        string htmlPath = ReadExistingFilePath("Saved HTML file path (e.g., C:\\Rates\\bog_rates.html): ");
+        // --- load configuration ---
+        var config = new ConfigurationBuilder()
+            .SetBasePath(AppContext.BaseDirectory)
+            .AddJsonFile("appsettings.json", optional: true, reloadOnChange: false)
+            .AddEnvironmentVariables(prefix: "RATES_") // e.g. RATES_Source=Online
+            .Build();
+
+        var settings = new Settings();
+        config.Bind(settings);
+
+        // --- choose provider based on settings.Source ---
+        IRateProvider provider = settings.Source?.Trim().ToLowerInvariant() switch
+        {
+            "online" => new BankOfGreeceRateProvider(),            // may 403, but path exists
+            "special" => new SpecialRateProvider(),                 // placeholder
+            _ => new LocalHtmlRateProvider(RequireLocal(settings.LocalHtmlPath))
+        };
+
+        Console.WriteLine($"Source: {settings.Source}");
+
+        // --- inputs (no html path prompt anymore) ---
         decimal amount = ReadDecimal("Amount (€): ");
         DateTime from = ReadDate("Date (from) [yyyy-MM-dd]: ");
         DateTime to = ReadDate("Date (to)   [yyyy-MM-dd]: ");
         DayCount method = ReadMethod();
         RateType rate = ReadRateType();
 
-        IRateProvider externalProvider = new BankOfGreeceRateProvider();
-        //var periods = await externalProvider.GetPeriodsAsync();        
+        // --- fetch periods ---
+        IReadOnlyList<RatePeriod> periods;
+        try
+        {
+            periods = await provider.GetPeriodsAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"\nERROR fetching rates: {ex.Message}");
+            return;
+        }
 
-        IRateProvider localProvider = new LocalHtmlRateProvider(htmlPath);
-        var periods = await localProvider.GetPeriodsAsync();
-
-        // 3) Calculate
+        // --- calculate ---
         var calc = new InterestCalculator();
         var slices = calc.Calculate(periods, from, to, amount, rate, method).ToList();
 
@@ -38,7 +65,7 @@ internal static class Program
             return;
         }
 
-        // 4) Output: detailed table
+        // --- output: detailed breakdown ---
         Console.WriteLine("\n--- Detailed breakdown ---");
         Console.WriteLine("Period                Days   Annual %   Interest (€)");
         Console.WriteLine("----------------------------------------------------");
@@ -49,30 +76,14 @@ internal static class Program
             Console.WriteLine($"{s.From:yyyy-MM-dd}..{s.To:yyyy-MM-dd}  {s.Days,4}   {s.AnnualRatePercent,7:0.00}      {s.Interest,10:0.00}");
         }
 
-        // 5) Yearly summary
+        // --- yearly summary ---
         Console.WriteLine("\n--- Yearly summary ---");
-        var byYear = new SortedDictionary<int, decimal>();
-        foreach (var s in slices)
-        {
-            foreach (var part in SplitByYear(s.From, s.To))
-            {
-                int y = part.start.Year;
-                int days = (int)(part.end - part.start).TotalDays + 1;
-                decimal denom = method == DayCount.CalendarYear
-                    ? (DateTime.IsLeapYear(y) ? 366m : 365m)
-                    : 360m;
-
-                decimal interest = amount * (s.AnnualRatePercent / 100m) * (days / denom);
-                byYear.TryGetValue(y, out var curr);
-                byYear[y] = curr + decimal.Round(interest, 2, MidpointRounding.AwayFromZero);
-            }
-        }
-        foreach (var kv in byYear)
-            Console.WriteLine($"{kv.Key}: {kv.Value:0.00} €");
+        foreach (var (year, value) in SummarizeByYear(slices, amount, method))
+            Console.WriteLine($"{year}: {value:0.00} €");
 
         Console.WriteLine($"\nTOTAL INTEREST: {total:0.00} €");
 
-        // 6) Optional CSV export
+        // --- optional CSV export ---
         if (YesNo("\nExport CSV with the detailed breakdown? [y/n]: "))
         {
             var csvPath = WriteCsv(slices, amount, rate, method);
@@ -82,19 +93,16 @@ internal static class Program
         Console.WriteLine("\nDone.");
     }
 
-    // ---------------------- Helpers: input ----------------------
-
-    private static string ReadExistingFilePath(string prompt)
+    private static string RequireLocal(string? configuredPath)
     {
-        while (true)
-        {
-            Console.Write(prompt);
-            var p = (Console.ReadLine() ?? "").Trim().Trim('"');
-            if (File.Exists(p)) return p;
-            Console.WriteLine("File not found. Please paste a valid path.");
-        }
+        if (string.IsNullOrWhiteSpace(configuredPath))
+            throw new FileNotFoundException("LocalHtmlPath is empty in appsettings.json.");
+        if (!File.Exists(configuredPath))
+            throw new FileNotFoundException("Local HTML file was not found.", configuredPath);
+        return configuredPath;
     }
 
+    // ---------- input helpers ----------
     private static decimal ReadDecimal(string prompt)
     {
         while (true)
@@ -105,7 +113,6 @@ internal static class Program
             Console.WriteLine("Enter a valid non-negative number. Use dot for decimals (e.g., 10000.50).");
         }
     }
-
     private static DateTime ReadDate(string prompt)
     {
         while (true)
@@ -116,7 +123,6 @@ internal static class Program
             Console.WriteLine("Use format yyyy-MM-dd (e.g., 2024-03-15).");
         }
     }
-
     private static DayCount ReadMethod()
     {
         while (true)
@@ -128,7 +134,6 @@ internal static class Program
             Console.WriteLine("Choose 1 or 2.");
         }
     }
-
     private static RateType ReadRateType()
     {
         while (true)
@@ -140,7 +145,6 @@ internal static class Program
             Console.WriteLine("Choose 1 or 2.");
         }
     }
-
     private static bool YesNo(string prompt)
     {
         while (true)
@@ -152,26 +156,34 @@ internal static class Program
         }
     }
 
-    // Split a date range into per-year chunks
-    private static IEnumerable<(DateTime start, DateTime end)> SplitByYear(DateTime start, DateTime end)
+    private static IEnumerable<(int year, decimal value)> SummarizeByYear(
+        IEnumerable<InterestSlice> slices, decimal amount, DayCount method)
     {
-        var cur = start;
-        while (cur.Year < end.Year)
+        var byYear = new SortedDictionary<int, decimal>();
+        foreach (var s in slices)
         {
-            var yEnd = new DateTime(cur.Year, 12, 31);
-            yield return (cur, yEnd);
-            cur = yEnd.AddDays(1);
+            var cur = s.From;
+            while (cur.Year < s.To.Year)
+            {
+                var yearEnd = new DateTime(cur.Year, 12, 31);
+                Add(cur, yearEnd); cur = yearEnd.AddDays(1);
+            }
+            Add(cur, s.To);
+
+            void Add(DateTime a, DateTime b)
+            {
+                int y = a.Year;
+                int days = (int)(b - a).TotalDays + 1;
+                decimal denom = method == DayCount.CalendarYear ? (DateTime.IsLeapYear(y) ? 366m : 365m) : 360m;
+                decimal interest = amount * (s.AnnualRatePercent / 100m) * (days / denom);
+                byYear.TryGetValue(y, out var curr);
+                byYear[y] = curr + decimal.Round(interest, 2, MidpointRounding.AwayFromZero);
+            }
         }
-        yield return (cur, end);
+        foreach (var kv in byYear) yield return (kv.Key, kv.Value);
     }
 
-    // ---------------------- CSV export ----------------------
-
-    private static string WriteCsv(
-        IEnumerable<InterestSlice> slices,
-        decimal amount,
-        RateType rateType,
-        DayCount method)
+    private static string WriteCsv(IEnumerable<InterestSlice> slices, decimal amount, RateType rateType, DayCount method)
     {
         var now = DateTime.Now;
         var fileName = $"interest_breakdown_{now:yyyyMMdd_HHmmss}.csv";
